@@ -1,2 +1,3 @@
 (library
- (name capsnet))
+ (name capsnet)
+ (libraries torch torch.vision torch.core))
