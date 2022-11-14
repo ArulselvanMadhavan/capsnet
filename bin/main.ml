@@ -1,4 +1,5 @@
 let () =
-  let _c = Capsnet.make () in
+  let c = Capsnet.make () in
+  Capsnet.train c;
   print_endline "Hello, World!"
 ;;

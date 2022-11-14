@@ -4,7 +4,9 @@ let squash x =
   let l2 = Tensor.sum_dim_intlist l2 ~dim:(Some [ 2 ]) ~keepdim:false ~dtype:(T Float) in
   let lengths = Tensor.sqrt l2 in
   let l2 = Tensor.div l2 (Tensor.add_scalar l2 (Scalar.i 1)) in
-  Tensor.mul l2 (Tensor.div x lengths)
+  let l2 = Tensor.div l2 lengths in
+  let x_shp = Array.of_list (Tensor.shape x) in
+  Tensor.mul x (Tensor.view l2 ~size:[ x_shp.(0); x_shp.(1); 1 ])
 ;;
 
 module AgreementRouting = struct
@@ -96,6 +98,7 @@ module CapsLayer = struct
 
   let forward t caps_output =
     let caps_output = Tensor.unsqueeze caps_output ~dim:2 in
+    Stdio.printf "%s|%s\n" (Tensor.shape_str caps_output) (Tensor.shape_str t.weights);
     let u_predict = Tensor.matmul caps_output t.weights in
     let u_predict =
       Tensor.view
@@ -370,7 +373,7 @@ let make
   }
 ;;
 
-let batches = Base.(10 ** 8)
+let batches = Base.(10 ** 2)
 
 let train t =
   let open Torch in
@@ -378,6 +381,7 @@ let train t =
     let batch_images, batch_labels =
       Dataset_helper.train_batch t.mnist ~batch_size:t.batch_size ~batch_idx
     in
+    let batch_images = Tensor.reshape ~shape:[ t.batch_size; 1; 28; 28 ] batch_images in
     if t.with_reconstruction
     then (
       let output, probs =
@@ -390,15 +394,29 @@ let train t =
     else ();
     if Base.(batch_idx % 50) = 0
     then (
-      let images, labels = t.mnist.test_images, t.mnist.test_labels in
-      let output, _probs = CapsNetWithReconstruction.forward t.recmodel images labels in
+      let batch_images, batch_labels = t.mnist.test_images, t.mnist.test_labels in
+      let batch_images =
+        Tensor.slice ~dim:0 ~start:None ~end_:(Some t.batch_size) ~step:1 batch_images
+      in
+      let batch_labels =
+        Tensor.slice ~dim:0 ~start:None ~end_:(Some t.batch_size) ~step:1 batch_labels
+      in
+      let batch_images =
+        Tensor.reshape
+          ~shape:[ Tensor.shape batch_images |> List.hd; 1; 28; 28 ]
+          batch_images
+      in
+      let output, _probs =
+        CapsNetWithReconstruction.forward t.recmodel batch_images batch_labels
+      in
       let batch_accuracy =
-        Tensor.(argmax ~dim:(-1) output = labels)
+        Tensor.(argmax ~dim:(-1) output = batch_labels)
         |> Tensor.to_kind ~kind:(T Float)
         |> Tensor.sum
         |> Tensor.float_value
       in
-      Stdio.printf "Test acc:%f\n" batch_accuracy)
+      Stdio.printf "Test acc:%f\n" batch_accuracy);
+    Caml.Gc.full_major ()
   done;
   ()
 ;;
