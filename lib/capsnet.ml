@@ -1,15 +1,3 @@
-type t =
-  { batch_size : int
-  ; test_batch_size : int
-  ; epochs : int
-  ; lr : float
-  ; no_cuda : bool
-  ; seed : int
-  ; log_interval : int
-  ; routing_iterations : int
-  ; with_reconstruction : bool
-  }
-
 let squash x =
   let open Torch in
   let l2 = Tensor.pow_tensor_scalar x ~exponent:(Scalar.i 2) in
@@ -49,7 +37,7 @@ module AgreementRouting = struct
     (* capsule output *)
     let v = squash s in
     let v = ref v in
-    for i = 0 to t.n_iterations - 1 do
+    for _i = 0 to t.n_iterations - 1 do
       let sizes = Array.of_list (Tensor.size u_predict) in
       let batch_size = sizes.(0) in
       let input_caps = sizes.(1) in
@@ -124,7 +112,6 @@ module PrimaryCapsLayer = struct
     { conv : Torch.Nn.t
     ; output_caps : int
     ; output_dim : int
-    ; input_channels : int
     }
 
   let make vs ~input_channels ~output_caps ~output_dim ~kernel_size ~stride =
@@ -136,7 +123,7 @@ module PrimaryCapsLayer = struct
         ~input_dim:input_channels
         (output_caps * output_dim)
     in
-    { conv; output_caps; output_dim; input_channels }
+    { conv; output_caps; output_dim }
   ;;
 
   let forward t input =
@@ -156,19 +143,19 @@ module PrimaryCapsLayer = struct
   ;;
 end
 
-module type Net = sig
-  open Torch
+(* module type Net = sig *)
+(*   open Torch *)
 
-  type t
+(*   type t *)
 
-  val forward : t -> Tensor.t -> Tensor.t -> Tensor.t * Tensor.t
-end
+(*   val forward : t -> Tensor.t -> Tensor.t -> Tensor.t * Tensor.t *)
+(* end *)
 
-module Model(N: Net) = struct
-  type t = N.t
-  let forward = N.forward
-end
+(* module Model (N : Net) = struct *)
+(*   type t = N.t *)
 
+(*   let forward = N.forward *)
+(* end *)
 
 module CapsNet = struct
   open Torch
@@ -327,36 +314,91 @@ module MarginLoss = struct
   ;;
 end
 
+type t =
+  { batch_size : int
+      (* ; test_batch_size : int *)
+      (* ; epochs : int *)
+      (* ; lr : float *)
+      (* ; no_cuda : bool *)
+      (* ; seed : int *)
+      (* ; log_interval : int *)
+      (* ; routing_iterations : int *)
+  ; with_reconstruction : bool (* ; capsmodel : CapsNet.t *)
+  ; recmodel : CapsNetWithReconstruction.t
+  ; adam : Torch.Optimizer.t
+  ; loss : MarginLoss.t
+  ; mnist : Torch.Dataset_helper.t
+  }
+
 let make
   ?(batch_size = 128)
-  ?(test_batch_size = 1000)
-  ?(epochs = 250)
-  ?(lr = 0.001)
+  ?((* ?(test_batch_size = 1000) *)
+    (* ?(epochs = 250) *)
+    lr = 0.001)
   ?(no_cuda = false)
   ?(seed = 1)
-  ?(log_interval = 10)
-  ?(routing_iterations = 3)
+  ?((* ?(log_interval = 10) *)
+    routing_iterations = 3)
   ?(with_reconstruction = false)
   ()
   =
   let open Torch in
   let no_cuda = (not no_cuda) && not (Torch.Cuda.is_available ()) in
   Torch_core.Wrapper.manual_seed seed;
-  let _mnist = Mnist_helper.read_files () in
+  let mnist = Mnist_helper.read_files () in
   let device = if no_cuda then Device.Cpu else Device.Cuda 0 in
   let vs = Var_store.create ~name:"capsnet" ~device () in
-  let model = (CapsNet.make vs routing_iterations) in
-  let recmodel = (CapsNetWithReconstruction.make model (ReconstructionNet.make vs 16 10)) in
-  let optimzer = Torch.Optimizer.adam vs ~learning_rate:lr in
-  let scheduler = Torch.pa
+  let capsmodel = CapsNet.make vs routing_iterations in
+  let recmodel =
+    CapsNetWithReconstruction.make capsmodel (ReconstructionNet.make vs 16 10)
+  in
+  let adam = Optimizer.adam vs ~learning_rate:lr in
+  let loss = MarginLoss.make 0.9 0.1 0.5 in
   { batch_size
-  ; test_batch_size
-  ; epochs
-  ; lr
-  ; no_cuda
-  ; seed
-  ; log_interval
-  ; routing_iterations
-  ; with_reconstruction
+    (* ; test_batch_size *)
+    (* ; epochs *)
+    (* ; lr *)
+    (* ; no_cuda *)
+    (* ; seed *)
+    (* ; log_interval *)
+    (* ; routing_iterations *)
+  ; with_reconstruction (* ; capsmodel *)
+  ; recmodel
+  ; adam
+  ; loss
+  ; mnist
   }
+;;
+
+let batches = Base.(10 ** 8)
+
+let train t =
+  let open Torch in
+  for batch_idx = 1 to batches do
+    let batch_images, batch_labels =
+      Dataset_helper.train_batch t.mnist ~batch_size:t.batch_size ~batch_idx
+    in
+    if t.with_reconstruction
+    then (
+      let output, probs =
+        CapsNetWithReconstruction.forward t.recmodel batch_images batch_labels
+      in
+      let rec_loss = Tensor.mse_loss output batch_labels in
+      let margin_loss = MarginLoss.forward t.loss probs batch_labels true in
+      let loss = Tensor.add (Tensor.mul_scalar rec_loss (Scalar.f 0.0005)) margin_loss in
+      Optimizer.backward_step t.adam ~loss)
+    else ();
+    if Base.(batch_idx % 50) = 0
+    then (
+      let images, labels = t.mnist.test_images, t.mnist.test_labels in
+      let output, _probs = CapsNetWithReconstruction.forward t.recmodel images labels in
+      let batch_accuracy =
+        Tensor.(argmax ~dim:(-1) output = labels)
+        |> Tensor.to_kind ~kind:(T Float)
+        |> Tensor.sum
+        |> Tensor.float_value
+      in
+      Stdio.printf "Test acc:%f\n" batch_accuracy)
+  done;
+  ()
 ;;
